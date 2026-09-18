@@ -10,6 +10,14 @@
 Install-Module -Name PSYT
 ```
 
+For just the transcript as one plain-text string:
+
+```powershell
+Get-Transcript -videoId 'https://youtu.be/0oXOOlqVu5M' -OutputFormat Text
+```
+
+`Text` joins captions with spaces and collapses whitespace into a single paragraph. It omits timestamps and metadata, even when `IncludeTitle` or `IncludeDescription` is supplied. The default output remains `Markdown`; use `PSObject` for structured data.
+
 ### Example
 
 Reqirements:
@@ -25,6 +33,7 @@ $transcriptParams = @{
     videoId            = 'OHQFObW6PXA'
     IncludeTitle       = $true
     IncludeDescription = $true
+    OutputFormat       = 'PSObject'
 }
 
 $transcript = Get-Transcript @transcriptParams
@@ -76,5 +85,6 @@ $summary | glow
 
 ### Notes / Troubleshooting
 
+- Invalid video IDs, failed requests, unavailable videos and malformed responses throw errors that callers can catch with `try` / `catch`. A playable video with no captions returns no output.
 - The module fetches caption-track metadata via YouTube's Innertube player API (mirroring `youtube-transcript-api`) to avoid stale/blocked caption URLs.
 - If you see errors like **HTTP 429**, **bot/recaptcha**, or **Expected transcript XML but received HTML**, YouTube is blocking requests from your IP/network. Retrying later or using a different network/IP usually resolves it.
