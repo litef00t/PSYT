@@ -12,7 +12,7 @@ The PSYT module provides functions to validate YouTube video IDs, retrieve the H
 
 2. Get-VideoPageHtml
     - Retrieves the HTML content of a YouTube video page using the video ID.
-    - Returns the HTML content if successful, or null if failed.
+    - Returns the HTML content if successful, or throws if the request fails.
 
 3. Get-LangOptionsWithLink
     - Retrieves the language options with links for video captions using the video ID.
@@ -24,7 +24,7 @@ The PSYT module provides functions to validate YouTube video IDs, retrieve the H
 
 5. Get-Transcript
     - Retrieves the transcript of a YouTube video using the video ID.
-    - Returns an object containing the video title, description, language, and transcript parts.
+    - Returns Markdown by default, an object for PSObject, or caption text only for Text.
     - Optional parameters: IncludeTitle, IncludeDescription.
 
 
@@ -42,7 +42,7 @@ PS C:\> Test-YouTubeVideoId -InputString "https://www.youtube.com/watch?v=vc79sJ
 Returns: "vc79sJ9VOqk"
 
 .EXAMPLE
-PS C:\> Get-Transcript -videoId "GikIJpUv6oo" -IncludeTitle -IncludeDescription
+PS C:\> Get-Transcript -videoId "GikIJpUv6oo" -IncludeTitle -IncludeDescription -OutputFormat PSObject
 Returns: Object containing the video title, description, language, and transcript parts.
 
 .NOTES
@@ -57,14 +57,14 @@ function Test-YouTubeVideoId {
         [string]$InputString
     )
 
-    # Regular expression pattern for YouTube video ID
-    $pattern = '(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be)\/(?:watch\?v=)?(?:embed\/)?(?:v\/)?(?:shorts\/)?(?:\S*[^\w\-\s])?(?<id>[\w\-]{11})(?:\S*)?'
+    # Accept only complete IDs or supported YouTube URLs.
+    $pattern = '^(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/(?:watch\?(?:[^#\s]*&)?v=|embed/|v/|shorts/)|youtu\.be/)(?<id>[A-Za-z0-9_-]{11})(?:[?&#][^\s]*)?$'
 
     if ($InputString -match $pattern) {
         $videoId = $matches['id']
         Write-Verbose "Valid YouTube video ID found: $videoId"
         return $videoId
-    } elseif ($InputString -match '^[\w\-]{11}$') {
+    } elseif ($InputString -match '^[A-Za-z0-9_-]{11}$') {
         Write-Verbose "Valid YouTube video ID format: $InputString"
         return $InputString
     } else {
@@ -162,7 +162,7 @@ function Get-PSYTInnertubeData {
     } | ConvertTo-Json -Compress
 
     try {
-        return Invoke-RestMethod -Method Post -Uri $uri -WebSession $WebSession -Headers $Headers -ContentType 'application/json' -Body $body -SkipHttpErrorCheck
+        return Invoke-RestMethod -Method Post -Uri $uri -WebSession $WebSession -Headers $Headers -ContentType 'application/json' -Body $body -ErrorAction Stop
     } catch {
         throw "Failed to fetch Innertube player data: $($_.Exception.Message)"
     }
@@ -173,11 +173,21 @@ function Get-VideoPageHtml {
         [string]$videoId
     )
 
+    $videoId = Test-YouTubeVideoId -InputString $videoId
+    if (-not $videoId) {
+        throw 'Provide a valid YouTube video ID or URL.'
+    }
     try {
         $session = Get-PSYTWebSession
         $headers = Get-PSYTHeaders
 
-        $response = Invoke-WebRequest -Uri "https://www.youtube.com/watch?v=$videoId" -WebSession $session -Headers $headers -SkipHttpErrorCheck
+        $request = @{
+            Uri         = "https://www.youtube.com/watch?v=$videoId"
+            WebSession  = $session
+            Headers     = $headers
+            ErrorAction = 'Stop'
+        }
+        $response = Invoke-WebRequest @request
         $html = $response.Content
 
         # If YouTube serves a consent page, set the CONSENT cookie and retry once (mirrors youtube-transcript-api behavior).
@@ -185,51 +195,41 @@ function Get-VideoPageHtml {
             $consentMatch = [regex]::Match($html, 'name="v"\s+value="(.*?)"')
             if ($consentMatch.Success -and $consentMatch.Groups.Count -ge 2) {
                 Set-PSYTConsentCookie -WebSession $session -ConsentValue $consentMatch.Groups[1].Value
-                $response = Invoke-WebRequest -Uri "https://www.youtube.com/watch?v=$videoId" -WebSession $session -Headers $headers -SkipHttpErrorCheck
+                $response = Invoke-WebRequest @request
                 $html = $response.Content
             } else {
-                Write-Host "Failed to auto-consent to cookies for video ID: $videoId"
-                return $null
+                throw 'Could not resolve the YouTube consent page.'
             }
 
             if ($html -match 'action="https://consent\.youtube\.com/s"') {
-                Write-Host "Failed to auto-consent to cookies for video ID: $videoId"
-                return $null
+                throw 'YouTube still requires consent after retrying.'
             }
         }
-        # Check if the HTML content contains the video URL: <meta property="og:url" content="https://www.youtube.com/watch?v=GikIJpUv6oo">
-        if ($html -match 'og:url') {
-            # Check if the HTML content contains 'class="g-recaptcha"'
-            if ($html -match 'class="g-recaptcha"') {
-                Write-Host "Failed to get the HTML content Too Many Requests for video ID: $videoId"
-                return $null
-            }
-            # Check if the HTML content contains '"playabilityStatus":'
-            if ($html -notmatch '"playabilityStatus":') {
-                Write-Host "Failed to get the HTML content Video Unavailable for video ID: $videoId"
-                return $null
-            }
-            return $html
-        } else {
-            Write-Host "Failed to get the HTML content for video ID: $videoId"
-            return $null
-        }      
+        if ($html -match 'class="g-recaptcha"|Sign in to confirm you.?re not a bot') {
+            throw 'YouTube is blocking this request with a bot/recaptcha page.'
+        }
+        if ($html -notmatch 'og:url' -or $html -notmatch '"playabilityStatus":') {
+            throw 'YouTube did not return the expected video page.'
+        }
+        return $html
     } catch {
-        Write-Host "Failed to get the HTML content for video ID: $videoId"
-        return $null
+        throw "Failed to fetch video page for ${videoId}: $($_.Exception.Message)"
     }
 }
 
-# Function to get language options with links
+# Returns caption tracks with their URLs, preferring English over other languages.
 function Get-LangOptionsWithLink {
     param (
         [string]$videoId
     )
 
+    $videoId = Test-YouTubeVideoId -InputString $videoId
+    if (-not $videoId) {
+        throw 'Provide a valid YouTube video ID or URL.'
+    }
     $videoPageHtml = Get-VideoPageHtml -videoId $videoId
     if (-not $videoPageHtml) {
-        Write-Host 'Failed to get video page HTML'
-        return @()
+        throw 'YouTube returned an empty video page.'
     }
 
     # Match youtube-transcript-api: extract INNERTUBE_API_KEY from HTML then call Innertube player API
@@ -239,64 +239,41 @@ function Get-LangOptionsWithLink {
 
     $apiKey = Get-PSYTInnertubeApiKey -Html $videoPageHtml
     if (-not $apiKey) {
-        Write-Host 'Error parsing INNERTUBE API key'
-        return @()
+        throw 'The video page does not contain an Innertube API key.'
     }
 
     try {
         $innertubeData = Get-PSYTInnertubeData -VideoId $videoId -ApiKey $apiKey -WebSession $session -Headers $headers
+        $status = $innertubeData.playabilityStatus.status
+        if (-not $status) {
+            throw 'The player response is missing playability status.'
+        }
+        if ($status -ne 'OK') {
+            throw "Video is unavailable ($status): $($innertubeData.playabilityStatus.reason)"
+        }
         $captions = $innertubeData.captions.playerCaptionsTracklistRenderer
         if (-not $captions -or -not $captions.captionTracks) {
-            Write-Host 'No Caption Available'
+            Write-Verbose 'No captions available.'
             return @()
         }
 
-        $videoDetailsJson = $innertubeData.videoDetails
-        # Extract the caption tracks: baseUrl=/api/timedtext?... this url does expire after some time
-        $captionTracks = $captions.captionTracks
-        # This will give the language options
-        # if $_.name.runs.text else $_.name.simpleText
-
-        $languageOptions = $captionTracks | ForEach-Object { 
-            if ($_.name.runs.text) {
-                $_.name.runs.text 
-            } else {
-                $_.name.simpleText 
-            } }
-
-        # Looks like most will be 'English (auto-generated)' and 'English' azurming this is manuly created, so the one we want over auto-generated
-        $languageOptions = $languageOptions | Sort-Object {
-            if ($_ -eq 'English') {
-                return -1 
-            } elseif ($_ -match 'English') {
-                return 0 
-            } else {
-                return 1 
-            }
-        }
-
-        $languageOptionsWithLink = $languageOptions | ForEach-Object {
-            $langName = $_
-            # $link = ($captionTracks | Where-Object { $_.name.runs[0].text -or $_.name.simpleText -eq $langName }).baseUrl
-            $link = $captionTracks | ForEach-Object {
-                $name = if ($_.name.runs) { $_.name.runs[0].text } else { $_.name.simpleText }
-                if ($name -eq $langName) {
-                    # Mirror youtube-transcript-api behavior: remove fmt=srv3, which can trigger PO-token requirements / odd responses.
-                    ($_.baseUrl -replace '&fmt=srv3', '')
-                }
-            } | Select-Object -First 1
+        $languageOptions = foreach ($track in $captions.captionTracks) {
+            $name = if ($track.name.runs) { $track.name.runs.text -join '' } else { $track.name.simpleText }
             [PSCustomObject]@{
-                title       = $videoDetailsJson.title
-                description = $videoDetailsJson.shortDescription
-                language    = $langName
-                link        = $link
+                title       = $innertubeData.videoDetails.title
+                description = $innertubeData.videoDetails.shortDescription
+                language    = $name
+                link        = $track.baseUrl -replace '&fmt=srv3', ''
             }
         }
 
-        return $languageOptionsWithLink
+        return $languageOptions | Sort-Object -Stable {
+            if ($_.language -eq 'English') { 0 }
+            elseif ($_.language -match 'English') { 1 }
+            else { 2 }
+        }
     } catch {
-        Write-Host 'Error parsing captions JSON'
-        return @()
+        throw "Failed to retrieve caption tracks: $($_.Exception.Message)"
     }
 }
 function Get-RawTranscript {
@@ -314,10 +291,14 @@ function Get-RawTranscript {
     $session = Get-PSYTWebSession
     $headers = Get-PSYTHeaders
 
-    $transcriptPageResponse = Invoke-WebRequest -Uri $uri -WebSession $session -Headers $headers -SkipHttpErrorCheck
+    $transcriptPageResponse = Invoke-WebRequest -Uri $uri -WebSession $session -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
 
     if ($transcriptPageResponse.StatusCode -eq 429) {
         throw "YouTube is rate-limiting or blocking requests (HTTP 429) when fetching timedtext. Try again later or from a different network/IP."
+    }
+
+    if ($transcriptPageResponse.StatusCode -lt 200 -or $transcriptPageResponse.StatusCode -ge 300) {
+        throw "Failed to fetch transcript (HTTP $($transcriptPageResponse.StatusCode))."
     }
 
     $content = $transcriptPageResponse.Content
@@ -344,6 +325,9 @@ function Get-RawTranscript {
         throw "Failed to parse transcript XML: $($_.Exception.Message). First bytes: $snippet"
     }
 
+    if ($xmlDoc.DocumentElement.Name -ne 'transcript') {
+        throw 'Expected transcript XML but received an unexpected root element.'
+    }
     $textNodes = $xmlDoc.documentElement.ChildNodes
 
     $transcriptParts = @()
@@ -358,58 +342,75 @@ function Get-RawTranscript {
     return $transcriptParts
 }
 
-# Function to get the transcript
+# Formats a transcript object as Markdown, keeping caption text inside table cells.
+function ConvertTo-PSYTMarkdown {
+    param (
+        [PSCustomObject]$VideoInfo
+    )
+
+    $lines = @(
+        '# Video Transcript'
+        if ($VideoInfo.PSObject.Properties['title']) {
+            '## Title'
+            $VideoInfo.title
+        }
+        if ($VideoInfo.PSObject.Properties['description']) {
+            '## Description'
+            $VideoInfo.description
+        }
+        '## Language'
+        $VideoInfo.language
+        '## Transcript'
+        '| Start    | Duration | Text |'
+        '| :------- | :------ | :------ |'
+        foreach ($part in $VideoInfo.transcript) {
+            $text = ([string]$part.text).Replace('\', '\\').Replace('|', '\|') -replace '\r\n|\r|\n', '<br>'
+            "| $($part.start) | $($part.duration) | $text |"
+        }
+    )
+    return ($lines -join "`n") + "`n"
+}
+
+# Fetches the preferred caption track as Markdown, a transcript object, or plain text.
 function Get-Transcript {
     param (
         [Parameter(Mandatory)]
         [string]$videoId,
         [switch]$IncludeTitle,
         [switch]$IncludeDescription,
-        [ValidateSet('PSObject', 'Markdown')]
+        [ValidateSet('PSObject', 'Markdown', 'Text')]
         [string]$OutputFormat = 'Markdown'
     )
     $vidId = Test-YouTubeVideoId -InputString $videoId
-    $langOptLinks = Get-LangOptionsWithLink -videoId $vidId
+    if (-not $vidId) {
+        throw 'Provide a valid YouTube video ID or URL.'
+    }
+    $langOptLinks = @(Get-LangOptionsWithLink -videoId $vidId)
     if ($langOptLinks.Count -eq 0) {
-        Write-Host 'No transcripts available for this video.'
+        Write-Verbose 'No transcripts available for this video.'
         return @()
     }
     
-    $link = $langOptLinks[0].link
-    if ($null -ne $link) {
-
-        # retrun the video info
-        # title, description, transcript
-        $markdown = "# Video Transcript`n"
-        $videoinfo = [PSCustomObject][ordered]@{
-        }
-        if ($IncludeTitle) {
-            $videoinfo | Add-Member -NotePropertyName 'title' -NotePropertyValue $langOptLinks[0].title
-            $markdown += "## Title`n$($langOptLinks[0].title)`n"
-        }
-        if ($IncludeDescription) {
-            $videoinfo | Add-Member -NotePropertyName 'description' -NotePropertyValue $langOptLinks[0].description
-            $markdown += "## Description`n$($langOptLinks[0].description)`n"
-        }
-        $videoinfo | Add-Member -NotePropertyName 'language' -NotePropertyValue $langOptLinks[0].language
-        $markdown += "## Language`n$($langOptLinks[0].language)`n"
-        $videoinfo | Add-Member -NotePropertyName 'transcript' -NotePropertyValue (Get-RawTranscript -link $link)
-        $markdown += @"
-## Transcript
-| Start    | Duration | Text |
-| :------- | :------ | :------ |`n
-"@
-        foreach ($part in $videoinfo.transcript) {
-            $markdown += "| $($part.start) | $($part.duration) | $($part.text) |`n"
-        }
-        if ($OutputFormat -eq 'Markdown') {
-            return $markdown
-        } else {
-            return $videoinfo
-        }
-        
-    } else {
-        Write-Host 'No valid link found for the transcript.'
-        return @()
+    $track = $langOptLinks[0]
+    if (-not $track.link) {
+        throw 'The selected caption track has no transcript URL.'
     }
+
+    $videoInfo = [ordered]@{}
+    if ($IncludeTitle) {
+        $videoInfo.title = $track.title
+    }
+    if ($IncludeDescription) {
+        $videoInfo.description = $track.description
+    }
+    $videoInfo.language = $track.language
+    $videoInfo.transcript = Get-RawTranscript -link $track.link
+
+    if ($OutputFormat -eq 'Text') {
+        return (($videoInfo.transcript.text -join ' ') -replace '\s+', ' ').Trim()
+    }
+    if ($OutputFormat -eq 'PSObject') {
+        return [PSCustomObject]$videoInfo
+    }
+    return ConvertTo-PSYTMarkdown -VideoInfo ([PSCustomObject]$videoInfo)
 }
