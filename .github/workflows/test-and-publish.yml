@@ -1,0 +1,97 @@
+name: Test and publish
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-and-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Pester
+        run: Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion 5.7.1
+          $tests = Get-ChildItem -Path . -Filter '*.Tests.ps1' -Recurse -File
+          if (-not $tests) {
+              throw 'No *.Tests.ps1 files found. Merge the test suite before publishing.'
+          }
+          $result = Invoke-Pester -Path $tests.FullName -Output Detailed -PassThru
+          if ($result.Result -ne 'Passed' -or $result.PassedCount -eq 0) {
+              throw 'Tests must pass before publishing.'
+          }
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Bump version and publish
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:PSGALLERY_API_KEY)) {
+              throw 'Add the PSGALLERY_API_KEY repository secret before publishing.'
+          }
+
+          # Only release the tested commit while it is still the tip of main.
+          git fetch origin main
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to fetch main.' }
+          if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) {
+              throw 'Main has moved. The workflow for the newer commit will publish instead.'
+          }
+
+          $manifestPath = Join-Path $PWD 'PSYT.psd1'
+          $manifest = Import-PowerShellDataFile $manifestPath
+          $version = [version]$manifest.ModuleVersion
+          $nextVersion = '{0}.{1}.{2}' -f $version.Major, $version.Minor, ($version.Build + 1)
+          Update-ModuleManifest -Path $manifestPath -ModuleVersion $nextVersion
+          Test-ModuleManifest -Path $manifestPath -ErrorAction Stop | Out-Null
+
+          # Stage only the files intended for Gallery users.
+          $packagePath = Join-Path $env:RUNNER_TEMP 'PSYT'
+          New-Item -ItemType Directory -Path $packagePath -Force | Out-Null
+          Copy-Item PSYT.psd1, PSYT.psm1, README.md, LICENSE, changelog.md -Destination $packagePath
+          Copy-Item Media -Destination $packagePath -Recurse
+          Test-ModuleManifest -Path (Join-Path $packagePath 'PSYT.psd1') -ErrorAction Stop | Out-Null
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add PSYT.psd1
+          git commit -m "chore: bump module version to $nextVersion"
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to commit the version bump.' }
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to push the version bump. Nothing was published.' }
+
+          $publishParams = @{
+              Path = $packagePath
+              Repository = 'PSGallery'
+              NuGetApiKey = $env:PSGALLERY_API_KEY
+              ErrorAction = 'Stop'
+          }
+          Publish-Module @publishParams

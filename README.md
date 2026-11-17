@@ -74,6 +74,16 @@ $summary | glow
 - [x] Add getting video title
 - [ ] Add getting video chapters
 
+### Tests and publishing
+
+The GitHub Actions workflow runs Pester 5 tests named `*.Tests.ps1` on pull requests and pushes to `main`. It stops if no tests are present or none pass.
+
+After tests pass on a push to `main`, the workflow increments the patch version in `PSYT.psd1`, commits it back to `main`, and publishes to PowerShell Gallery. For example, `0.3.0` becomes `0.3.1`. The bot's version commit does not trigger another workflow run.
+
+Add a repository Actions secret named `PSGALLERY_API_KEY` containing a Gallery API key with permission to publish PSYT. Repository rules must allow the workflow's `GITHUB_TOKEN` to push the version commit to `main`.
+
+The version commit happens before publishing. If Gallery publishing fails, that version remains in Git. Re-running the old workflow stops because `main` has moved; the next push to `main` retries with the next patch version. If `main` changes while a run is testing, the older run stops and the newer run handles publishing.
+
 ### Notes / Troubleshooting
 
 - The module fetches caption-track metadata via YouTube's Innertube player API (mirroring `youtube-transcript-api`) to avoid stale/blocked caption URLs.
