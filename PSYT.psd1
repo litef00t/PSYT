@@ -1,6 +1,6 @@
 @{
     RootModule           = 'PSYT.psm1'
-    ModuleVersion        = '0.3.0'
+    ModuleVersion        = '0.4.0'
     CompatiblePSEditions = @('Core')
     GUID                 = '7b22e037-e42c-4321-926d-8f97cacd7079'
     Author               = 'Peter Cook'
