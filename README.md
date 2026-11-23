@@ -4,15 +4,25 @@
 
 ## PowerShell Module for Retrieving YouTube Transcripts
 
+Requires **PowerShell 7.4+**.
+
 ### Using the Module
 
 ```powershell
 Install-Module -Name PSYT
 ```
 
+For just the transcript as one plain-text string:
+
+```powershell
+Get-Transcript -videoId 'https://youtu.be/0oXOOlqVu5M' -OutputFormat Text
+```
+
+`Text` joins captions with spaces and collapses whitespace into a single paragraph. It omits timestamps and metadata, even when `IncludeTitle` or `IncludeDescription` is supplied. The default output remains `Markdown`; use `PSObject` for structured data.
+
 ### Example
 
-Reqirements:
+Requirements:
 
 - [PSAI Module](https://github.com/dfinke/psai)
 - [OpenAI API Key](https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key)
@@ -25,6 +35,7 @@ $transcriptParams = @{
     videoId            = 'OHQFObW6PXA'
     IncludeTitle       = $true
     IncludeDescription = $true
+    OutputFormat       = 'PSObject'
 }
 
 $transcript = Get-Transcript @transcriptParams
@@ -37,11 +48,11 @@ $($transcript.title)
 $($transcript.description)
 
 # Transcript:
-$($transcript.transcript | Out-String)
+$(($transcript.transcript | ForEach-Object { "[$($_.start)s] $($_.text)" }) -join "`n")
 "@
 
 $summaryParams = @{
-    Instructions = 'Write a concise summary of the with 3-5 bullet points that highlight the key points or takeaways from the video transcript, include the title and details from the description.'
+    Instructions = 'Write a concise summary of the video transcript with 3-5 bullet points that highlight the key points or takeaways from the video transcript, include the title and details from the description.'
     model        = 'gpt-4o-mini'
     UserInput    = $summaryInput
 }
@@ -76,15 +87,18 @@ $summary | glow
 
 ### Tests and publishing
 
-The GitHub Actions workflow runs Pester 5 tests named `*.Tests.ps1` on pull requests and pushes to `main`. It stops if no tests are present or none pass.
+The GitHub Actions workflow validates `PSYT.psd1`, runs `PSScriptAnalyzer`, and runs Pester 5 tests (`*.Tests.ps1`) on both Windows and Linux for pull requests, pushes to `main`, `v*` tags, and manual runs.
 
-After tests pass on a push to `main`, the workflow increments the patch version in `PSYT.psd1`, commits it back to `main`, and publishes to PowerShell Gallery. For example, `0.3.0` becomes `0.3.1`. The bot's version commit does not trigger another workflow run.
+To publish a release to PowerShell Gallery:
 
-Add a repository Actions secret named `PSGALLERY_API_KEY` containing a Gallery API key with permission to publish PSYT. Repository rules must allow the workflow's `GITHUB_TOKEN` to push the version commit to `main`.
+1. Bump `ModuleVersion` in `PSYT.psd1` and update `changelog.md` via PR to `main`.
+2. Push a matching tag (for example, `v0.3.1`) or trigger the workflow manually via `workflow_dispatch` on `main`.
 
-The version commit happens before publishing. If Gallery publishing fails, that version remains in Git. Re-running the old workflow stops because `main` has moved; the next push to `main` retries with the next patch version. If `main` changes while a run is testing, the older run stops and the newer run handles publishing.
+Add a repository Actions secret named `PSGALLERY_API_KEY` containing a Gallery API key with permission to publish PSYT. When triggered by a `v*` tag, the workflow verifies that the tag matches `PSYT.psd1`'s `ModuleVersion` before publishing.
 
 ### Notes / Troubleshooting
 
+- Invalid video IDs, failed requests, unavailable videos, and malformed responses throw errors that callers can catch with `try` / `catch`. A playable video with no captions returns no output.
+- The module reuses a single `WebRequestSession` for the lifetime of the module import so YouTube consent cookies persist across requests.
 - The module fetches caption-track metadata via YouTube's Innertube player API (mirroring `youtube-transcript-api`) to avoid stale/blocked caption URLs.
-- If you see errors like **HTTP 429**, **bot/recaptcha**, or **Expected transcript XML but received HTML**, YouTube is blocking requests from your IP/network. Retrying later or using a different network/IP usually resolves it.
+- If you see errors like **HTTP 429**, **bot/recaptcha**, or **Expected transcript XML but received HTML**, YouTube is blocking requests or serving a consent/interstitial page to your IP/network. Retrying later or using a different network/IP usually resolves it.
