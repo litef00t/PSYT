@@ -1,0 +1,105 @@
+name: Test and publish
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-and-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Pester and PSScriptAnalyzer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Validate module manifest and analyze scripts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Test-ModuleManifest -Path ./PSYT.psd1 -ErrorAction Stop | Out-Null
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error, Warning)
+          if ($findings.Count -gt 0) {
+              ($findings | Format-Table -AutoSize ScriptName, RuleName, Severity, Line, Message | Out-String) | Write-Host
+              throw "PSScriptAnalyzer reported $($findings.Count) Error/Warning finding(s)."
+          }
+
+      - name: Run tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion 5.7.1
+          $tests = Get-ChildItem -Path . -Filter '*.Tests.ps1' -Recurse -File
+          if (-not $tests) {
+              throw 'No *.Tests.ps1 files found. Merge the test suite before publishing.'
+          }
+          $result = Invoke-Pester -Path $tests.FullName -Output Detailed -PassThru
+          if ($result.Result -ne 'Passed' -or $result.PassedCount -eq 0) {
+              throw 'Tests must pass before publishing.'
+          }
+
+  publish:
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Publish module to PowerShell Gallery
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:PSGALLERY_API_KEY)) {
+              throw 'Add the PSGALLERY_API_KEY repository secret before publishing.'
+          }
+
+          $manifestPath = Join-Path $PWD 'PSYT.psd1'
+          $manifest = Import-PowerShellDataFile $manifestPath
+          $moduleVersion = [string]$manifest.ModuleVersion
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and $env:GITHUB_REF -cne 'refs/heads/main') {
+              throw "Manual publishing is only allowed from refs/heads/main (got '$env:GITHUB_REF')."
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_NAME -cne "v$moduleVersion") {
+              throw "Tag '$env:GITHUB_REF_NAME' does not match PSYT.psd1 ModuleVersion 'v$moduleVersion'."
+          }
+
+          # Stage only the files intended for Gallery users.
+          $packagePath = Join-Path $env:RUNNER_TEMP 'PSYT'
+          New-Item -ItemType Directory -Path $packagePath -Force | Out-Null
+          Copy-Item PSYT.psd1, PSYT.psm1, README.md, LICENSE, changelog.md -Destination $packagePath
+          Copy-Item Media -Destination $packagePath -Recurse
+          Test-ModuleManifest -Path (Join-Path $packagePath 'PSYT.psd1') -ErrorAction Stop | Out-Null
+
+          $publishParams = @{
+              Path        = $packagePath
+              Repository  = 'PSGallery'
+              NuGetApiKey = $env:PSGALLERY_API_KEY
+              ErrorAction = 'Stop'
+          }
+          Publish-Module @publishParams
