@@ -23,8 +23,8 @@ PSYT is a PowerShell module that provides functions to retrieve YouTube video tr
         PSData = @{
             Category   = 'PowerShell YouTube Transcripts Module'
             Tags       = @('PowerShell', 'YouTube', 'Transcripts')
-            ProjectUri = 'https://github.com/Blindpete/PSYT/'
-            LicenseUri = 'https://github.com/Blindpete/PSYT/blob/main/LICENSE'
+            ProjectUri = 'https://github.com/litef00t/PSYT/'
+            LicenseUri = 'https://github.com/litef00t/PSYT/blob/main/LICENSE'
         }
     }
 }

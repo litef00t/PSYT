@@ -567,7 +567,7 @@ function Get-Transcript {
     Get-Transcript -videoId 'GikIJpUv6oo' -OutputFormat Text
 
     .LINK
-    https://github.com/Blindpete/PSYT
+    https://github.com/litef00t/PSYT
     #>
     [CmdletBinding()]
     param (
